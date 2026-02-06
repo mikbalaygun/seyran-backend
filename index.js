@@ -267,15 +267,33 @@ app.post('/api/mail/send', async (req, res) => {
         })
 
         // Determine receivers
-        // User requested: "json verisindeki insanlara test için mail atmayalım test için mikbalaygun@gmail.com mailine atabiliriz"
-        const receivers = [process.env.TEST_MAIL_RECEIVER || "mikbalaygun@gmail.com"]
-        // In production, we would add: req.body.params.mail, "europe@seyrankoltuk.com.tr", etc.
+        // User requested to send to real customers
+        const customerMail = req.body.params?.mail; // e.g. "musteri@example.com"
+        const testMail = process.env.TEST_MAIL_RECEIVER || "mikbalaygun@gmail.com";
+
+        // Construct receivers list
+        // If customer mail exists, send to it. 
+        // Also send copy to test/admin mail for verification/monitoring if desired, or just use customer mail.
+        // Interpretation: "Real users" -> Primary.
+        const receivers = [];
+        if (customerMail && customerMail.includes('@')) {
+            receivers.push(customerMail);
+            // Optionally CC the admin
+            // receivers.push(testMail); 
+        } else {
+            console.warn("Müşteri maili bulunamadı veya geçersiz. Test mailine gönderiliyor.");
+            receivers.push(testMail);
+        }
+
+        // Additional hardcoded CCs if needed (from old v1 app logic usually there is a fixed list)
+        // For now, adhering strictly to "send to real users".
 
         console.log('Mail gönderiliyor:', receivers)
 
         await transporter.sendMail({
             from: process.env.SMTP_USER,
             to: receivers,
+            cc: [testMail], // Always CC the admin/test receiver for tracking
             subject: req.body.headerText || "Kalite Kontrol Raporu",
             html: `<!DOCTYPE html>
             <html lang="en">
