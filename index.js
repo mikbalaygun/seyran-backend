@@ -89,8 +89,29 @@ const processErpFile = async () => {
                 });
                 count++;
             } else {
-                // Optional: Update existing order if details changed
-                // await prisma.order.update(...)
+                // Update existing order if found (e.g. name change, details change)
+                await prisma.order.update({
+                    where: { id: exists.id },
+                    data: {
+                        firma: order.firma,
+                        musadi: order.musadi,
+                        mail: order.mail,
+                        tarih: order.tarih,
+                        urunadi: order.urunadi,
+                        out: order.out,
+                        stkno: order.stkno ? String(order.stkno) : null,
+                        sevktar: order.sevktar,
+                        mik: order.mik,
+                        modul: order.modul,
+                        kumas: order.kumas,
+                        acik: order.acik,
+                        ayak: order.ayak,
+                        kirlent: order.kirlent,
+                        tip: order.tip,
+                    }
+                });
+                // Optional: Log update?
+                // console.log(`Sipariş güncellendi: ${order.sipno}-${order.sipsr}`);
             }
         }
         console.log(`Senkronizasyon Tamamlandı. ${count} yeni sipariş eklendi.`);
