@@ -90,28 +90,47 @@ const processErpFile = async () => {
                 count++;
             } else {
                 // Update existing order if found (e.g. name change, details change)
-                await prisma.order.update({
-                    where: { id: exists.id },
-                    data: {
-                        firma: order.firma,
-                        musadi: order.musadi,
-                        mail: order.mail,
-                        tarih: order.tarih,
-                        urunadi: order.urunadi,
-                        out: order.out,
-                        stkno: order.stkno ? String(order.stkno) : null,
-                        sevktar: order.sevktar,
-                        mik: order.mik,
-                        modul: order.modul,
-                        kumas: order.kumas,
-                        acik: order.acik,
-                        ayak: order.ayak,
-                        kirlent: order.kirlent,
-                        tip: order.tip,
-                    }
-                });
-                // Optional: Log update?
-                // console.log(`Sipariş güncellendi: ${order.sipno}-${order.sipsr}`);
+                // Check if data actually changed to avoid unnecessary updates/timestamp refreshes
+                const isDifferent =
+                    exists.firma !== order.firma ||
+                    exists.musadi !== order.musadi ||
+                    exists.mail !== order.mail ||
+                    exists.tarih !== order.tarih ||
+                    exists.urunadi !== order.urunadi ||
+                    exists.out !== order.out ||
+                    (exists.stkno !== (order.stkno ? String(order.stkno) : null)) ||
+                    exists.sevktar !== order.sevktar ||
+                    exists.mik !== order.mik ||
+                    exists.modul !== order.modul ||
+                    exists.kumas !== order.kumas ||
+                    exists.acik !== order.acik ||
+                    exists.ayak !== order.ayak ||
+                    exists.kirlent !== order.kirlent ||
+                    exists.tip !== order.tip;
+
+                if (isDifferent) {
+                    await prisma.order.update({
+                        where: { id: exists.id },
+                        data: {
+                            firma: order.firma,
+                            musadi: order.musadi,
+                            mail: order.mail,
+                            tarih: order.tarih,
+                            urunadi: order.urunadi,
+                            out: order.out,
+                            stkno: order.stkno ? String(order.stkno) : null,
+                            sevktar: order.sevktar,
+                            mik: order.mik,
+                            modul: order.modul,
+                            kumas: order.kumas,
+                            acik: order.acik,
+                            ayak: order.ayak,
+                            kirlent: order.kirlent,
+                            tip: order.tip,
+                        }
+                    });
+                    console.log(`Sipariş güncellendi: ${order.sipno}-${order.sipsr}`);
+                }
             }
         }
         console.log(`Senkronizasyon Tamamlandı. ${count} yeni sipariş eklendi.`);
