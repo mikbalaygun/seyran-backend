@@ -39,5 +39,8 @@ model Order {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   
+  mailSent      Boolean  @default(false)
+  mailSentAt    DateTime?
+  
   @@unique([sipno, sipsr])
 }

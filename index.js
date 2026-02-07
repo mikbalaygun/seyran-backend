@@ -334,6 +334,28 @@ app.post('/api/mail/send', async (req, res) => {
             attachments: attachments
         })
 
+        // 7. Update Order Status in DB (Mark as Mail Sent)
+        if (req.body.params && req.body.params.sipno && req.body.params.sipsr) {
+            try {
+                // Ensure they are integers as per schema
+                const sipno = parseInt(req.body.params.sipno);
+                const sipsr = parseInt(req.body.params.sipsr);
+
+                await prisma.order.update({
+                    where: {
+                        sipno_sipsr: { sipno, sipsr }
+                    },
+                    data: {
+                        mailSent: true,
+                        mailSentAt: new Date()
+                    }
+                });
+                console.log(`Sipariş mail durumu güncellendi: ${sipno}-${sipsr}`);
+            } catch (dbErr) {
+                console.error('Sipariş durumu güncellenemedi (Mail Sent Flag):', dbErr);
+            }
+        }
+
         res.json({ success: true, message: 'Mail gönderildi ve FTP yüklendi' })
 
     } catch (error) {
