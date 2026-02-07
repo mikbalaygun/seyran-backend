@@ -383,6 +383,6 @@ app.post('/api/mail/send', async (req, res) => {
     }
 })
 
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`)
+app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Server running securely on http://127.0.0.1:${PORT}`)
 })
