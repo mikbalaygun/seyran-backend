@@ -165,6 +165,23 @@ fs.watch(WATCH_DIR, (eventType, filename) => {
 });
 // ----------------------------------------
 
+// --- JWT AUTH MIDDLEWARE ---
+const authMiddleware = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Yetkilendirme gerekli' });
+    }
+    const token = authHeader.split(' ')[1];
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'seyran_secret_key_2026');
+        req.user = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Geçersiz veya süresi dolmuş token' });
+    }
+};
+// --------------------------
+
 // Auth Route
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body
@@ -202,8 +219,8 @@ app.post('/api/auth/login', async (req, res) => {
     }
 })
 
-// Orders Route
-app.get('/api/orders', async (req, res) => {
+// Orders Route (Protected)
+app.get('/api/orders', authMiddleware, async (req, res) => {
     try {
         const orders = await prisma.order.findMany({
             orderBy: { tarih: 'desc' }
@@ -215,8 +232,8 @@ app.get('/api/orders', async (req, res) => {
     }
 })
 
-// Original Logic: /test/deneme -> repurposed to /api/mail/send
-app.post('/api/mail/send', async (req, res) => {
+// Mail Send Route (Protected)
+app.post('/api/mail/send', authMiddleware, async (req, res) => {
     console.log('Mail gönderme isteği aldı:', req.body.headerText);
 
     try {
@@ -226,7 +243,7 @@ app.post('/api/mail/send', async (req, res) => {
             for (let i = 0; i < req.body.images.length; i++) {
                 const base64Data = req.body.images[i].split(';base64,').pop()
                 attachments.push({
-                    filename: `image_${Date.now()}_${i}.jpeg`, // Better naming
+                    filename: `image_${Date.now()}_${i}.jpeg`,
                     content: base64Data,
                     encoding: 'base64'
                 })
@@ -235,13 +252,6 @@ app.post('/api/mail/send', async (req, res) => {
 
         // 2. Prepare Question/Answers HTML
         const questionAnswersHTML = req.body.questions.map(q => {
-            // Find answer
-            // The old code was weird: answer: Object.values(req.body.answers)[i]
-            // We should try to be safer.
-            // Assume questions and answers are aligned or passed correctly.
-            // Ideally the frontend sends structured { question, answer } pairs.
-            // But if we keep frontend roughly same, we follow the pattern.
-            // For the HTML view:
             return `<div style='display: flex; flex-direction: row; max-width: 400px; border-bottom: 1px solid #ccc;'>
                         <span style='width: 70%; padding: 10px; background-color: #f0f0f0; margin-top: 10px;'>${q.question}</span>
                         <span style='width: 30%; padding: 10px; margin-top: 10px; background-color: aquamarine; display: flex; align-items: center; justify-content: center;'>${q.fakeRes || "Evet"}</span>
@@ -262,9 +272,6 @@ app.post('/api/mail/send', async (req, res) => {
             }
         }
 
-        // Map answers for XML
-        // Assuming req.body.answers is an object with keys matching indices or just values?
-        // Old code: answer: Object.values(req.body.answers)[i]
         const answerValues = Object.values(req.body.answers || {})
         for (let i = 0; i < req.body.questions.length; i++) {
             xmlData.questions.push({
@@ -273,43 +280,14 @@ app.post('/api/mail/send', async (req, res) => {
             })
         }
 
-        // 4. Build XML
+        // 4. Build XML & write locally
         const builder = new xml2js.Builder()
         const xml = builder.buildObject(xmlData)
         const xmlFilename = `${xmlData.musInfo.sipno}-${xmlData.musInfo.sipsr}.xml`
         const localXmlPath = path.join(__dirname, xmlFilename)
-
-        // Write XML locally first
         fs.writeFileSync(localXmlPath, xml)
 
-        // 5. Upload to FTP
-        const client = new Client()
-        // client.ftp.verbose = true
-        try {
-            await client.access({
-                host: process.env.FTP_HOST,
-                user: process.env.FTP_USER,
-                password: process.env.FTP_PASS,
-                secure: false
-            })
-            // await client.ensureDir("/kalite-kontrol") // Optional, if needed
-            // The old code uploaded to `kalite-kontrol` + filename directly?
-            // Old code: "./kalite-kontrol" + xmlFileInner.musInfo.sipno + "-" + ...
-            // Let's assume there is a folder 'kalite-kontrol'.
-            const remotePath = `/kalite-kontrol/${xmlFilename}` // Correct pathing
-            await client.uploadFrom(localXmlPath, remotePath)
-            console.log('Uploaded to FTP:', remotePath)
-        } catch (ftpErr) {
-            console.error('FTP Error:', ftpErr)
-            // Don't fail the whole request just for FTP if mail works, or vice versa?
-            // Usually we want to know.
-        } finally {
-            client.close()
-            // Cleanup local file
-            if (fs.existsSync(localXmlPath)) fs.unlinkSync(localXmlPath)
-        }
-
-        // 6. Send Email
+        // 5. Send Email FIRST (user waits for this)
         let transporter = nodemailer.createTransport({
             host: process.env.SMTP_HOST,
             port: parseInt(process.env.SMTP_PORT || '465'),
@@ -320,34 +298,23 @@ app.post('/api/mail/send', async (req, res) => {
             },
         })
 
-        // Determine receivers
-        // User requested to send to real customers
-        const customerMail = req.body.params?.mail; // e.g. "musteri@example.com"
+        const customerMail = req.body.params?.mail;
         const testMail = process.env.TEST_MAIL_RECEIVER || "mikbalaygun@gmail.com";
 
-        // Construct receivers list
-        // If customer mail exists, send to it. 
-        // Also send copy to test/admin mail for verification/monitoring if desired, or just use customer mail.
-        // Interpretation: "Real users" -> Primary.
         const receivers = [];
         if (customerMail && customerMail.includes('@')) {
             receivers.push(customerMail);
-            // Optionally CC the admin
-            // receivers.push(testMail); 
         } else {
             console.warn("Müşteri maili bulunamadı veya geçersiz. Test mailine gönderiliyor.");
             receivers.push(testMail);
         }
-
-        // Additional hardcoded CCs if needed (from old v1 app logic usually there is a fixed list)
-        // For now, adhering strictly to "send to real users".
 
         console.log('Mail gönderiliyor:', receivers)
 
         await transporter.sendMail({
             from: process.env.SMTP_USER,
             to: receivers,
-            cc: [testMail], // Always CC the admin/test receiver for tracking
+            cc: [testMail, 'kalitekontrol@seyrankoltuk.com.tr'],
             subject: req.body.headerText || "Kalite Kontrol Raporu",
             html: `<!DOCTYPE html>
             <html lang="en">
@@ -367,10 +334,9 @@ app.post('/api/mail/send', async (req, res) => {
             attachments: attachments
         })
 
-        // 7. Update Order Status in DB (Mark as Mail Sent)
+        // 6. Update Order Status in DB (user waits for this too - very fast)
         if (req.body.params && req.body.params.sipno && req.body.params.sipsr) {
             try {
-                // Ensure they are integers as per schema
                 const sipno = parseInt(req.body.params.sipno);
                 const sipsr = parseInt(req.body.params.sipsr);
 
@@ -389,7 +355,29 @@ app.post('/api/mail/send', async (req, res) => {
             }
         }
 
-        res.json({ success: true, message: 'Mail gönderildi ve FTP yüklendi' })
+        // 7. RESPOND IMMEDIATELY - User sees success here!
+        res.json({ success: true, message: 'Mail gönderildi' })
+
+            // 8. Upload FTP in BACKGROUND (user does NOT wait for this)
+            ; (async () => {
+                const client = new Client()
+                try {
+                    await client.access({
+                        host: process.env.FTP_HOST,
+                        user: process.env.FTP_USER,
+                        password: process.env.FTP_PASS,
+                        secure: false
+                    })
+                    const remotePath = `/kalite-kontrol/${xmlFilename}`
+                    await client.uploadFrom(localXmlPath, remotePath)
+                    console.log('FTP yükleme tamamlandı (arka plan):', remotePath)
+                } catch (ftpErr) {
+                    console.error('FTP Error (arka plan):', ftpErr)
+                } finally {
+                    client.close()
+                    if (fs.existsSync(localXmlPath)) fs.unlinkSync(localXmlPath)
+                }
+            })();
 
     } catch (error) {
         console.error('Process Error:', error)
