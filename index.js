@@ -4,7 +4,7 @@ const express = require('express')
 const cors = require('cors')
 const { PrismaClient } = require('@prisma/client')
 const bcrypt = require('bcryptjs')
-const jwt = require('jsonwebtoken') // I realized I didn't install jsonwebtoken, need to add it or just use simple session/token
+const jwt = require('jsonwebtoken')
 const nodemailer = require('nodemailer')
 const { Client } = require('basic-ftp')
 const xml2js = require('xml2js')
@@ -14,7 +14,7 @@ const moment = require('moment-timezone')
 
 const app = express()
 const prisma = new PrismaClient()
-const PORT = process.env.PORT || 3001
+const PORT = process.env.PORT || 3002 // Cemre Port
 
 // Middleware
 app.use(cors())
@@ -33,14 +33,27 @@ if (!fs.existsSync(WATCH_DIR)) {
 
 console.log(`Watching for ERP data at: ${FULL_WATCH_PATH}`);
 
+// Debounce to prevent multiple rapid triggers
+let processingLock = false;
+
 // Function to process the JSON file
 const processErpFile = async () => {
+    // Prevent overlapping executions
+    if (processingLock) {
+        console.log('Zaten işleniyor, atlanıyor...');
+        return;
+    }
+    processingLock = true;
+
     console.log('ERP dosya değişikliği algılandı. İşleniyor...');
 
     // Wait a brief moment to ensure file write is complete
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    if (!fs.existsSync(FULL_WATCH_PATH)) return;
+    if (!fs.existsSync(FULL_WATCH_PATH)) {
+        processingLock = false;
+        return;
+    }
 
     try {
         const rawData = fs.readFileSync(FULL_WATCH_PATH, 'utf-8');
@@ -49,13 +62,34 @@ const processErpFile = async () => {
 
         if (!Array.isArray(orders)) {
             console.error('ERP Dosya Formatı Hatalı: wtemp dizisi bulunamadı.');
+            processingLock = false;
             return;
         }
 
         console.log(`Bulunan Sipariş Sayısı: ${orders.length}. Veritabanı güncelleniyor...`);
 
-        let count = 0;
+        let newCount = 0;
+        let updateCount = 0;
         for (const order of orders) {
+            const orderData = {
+                firma: order.firma,
+                musadi: order.musadi,
+                mail: order.mail,
+                tarih: order.tarih,
+                urunadi: order.urunadi,
+                out: order.out,
+                stkno: order.stkno ? String(order.stkno) : null,
+                sevktar: order.sevktar,
+                mik: order.mik,
+                modul: order.modul,
+                kumas: order.kumas,
+                acik: order.acik,
+                ayak: order.ayak,
+                kirlent: order.kirlent,
+                tip: order.tip,
+            };
+
+            // First check if it exists (for diff check to avoid unnecessary updatedAt changes)
             const exists = await prisma.order.findUnique({
                 where: {
                     sipno_sipsr: {
@@ -66,30 +100,23 @@ const processErpFile = async () => {
             });
 
             if (!exists) {
-                await prisma.order.create({
-                    data: {
+                // Use upsert to safely handle race conditions
+                await prisma.order.upsert({
+                    where: {
+                        sipno_sipsr: {
+                            sipno: order.sipno,
+                            sipsr: order.sipsr,
+                        }
+                    },
+                    create: {
                         sipno: order.sipno,
                         sipsr: order.sipsr,
-                        firma: order.firma,
-                        musadi: order.musadi,
-                        mail: order.mail,
-                        tarih: order.tarih,
-                        urunadi: order.urunadi,
-                        out: order.out,
-                        stkno: order.stkno ? String(order.stkno) : null,
-                        sevktar: order.sevktar,
-                        mik: order.mik,
-                        modul: order.modul,
-                        kumas: order.kumas,
-                        acik: order.acik,
-                        ayak: order.ayak,
-                        kirlent: order.kirlent,
-                        tip: order.tip,
-                    }
+                        ...orderData,
+                    },
+                    update: {} // If it was already created by a parallel run, do nothing
                 });
-                count++;
+                newCount++;
             } else {
-                // Update existing order if found (e.g. name change, details change)
                 // Check if data actually changed to avoid unnecessary updates/timestamp refreshes
                 const isDifferent =
                     exists.firma !== order.firma ||
@@ -111,32 +138,19 @@ const processErpFile = async () => {
                 if (isDifferent) {
                     await prisma.order.update({
                         where: { id: exists.id },
-                        data: {
-                            firma: order.firma,
-                            musadi: order.musadi,
-                            mail: order.mail,
-                            tarih: order.tarih,
-                            urunadi: order.urunadi,
-                            out: order.out,
-                            stkno: order.stkno ? String(order.stkno) : null,
-                            sevktar: order.sevktar,
-                            mik: order.mik,
-                            modul: order.modul,
-                            kumas: order.kumas,
-                            acik: order.acik,
-                            ayak: order.ayak,
-                            kirlent: order.kirlent,
-                            tip: order.tip,
-                        }
+                        data: orderData
                     });
+                    updateCount++;
                     console.log(`Sipariş güncellendi: ${order.sipno}-${order.sipsr}`);
                 }
             }
         }
-        console.log(`Senkronizasyon Tamamlandı. ${count} yeni sipariş eklendi.`);
+        console.log(`Senkronizasyon Tamamlandı. ${newCount} yeni, ${updateCount} güncellenen sipariş.`);
 
     } catch (err) {
         console.error('ERP Dosya İşleme Hatası:', err);
+    } finally {
+        processingLock = false;
     }
 };
 
@@ -150,6 +164,25 @@ fs.watch(WATCH_DIR, (eventType, filename) => {
     }
 });
 // ----------------------------------------
+
+// --- JWT AUTH MIDDLEWARE ---
+const authMiddleware = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        console.warn(`[AUTH] Reddedildi - Token yok. Path: ${req.path}`);
+        return res.status(401).json({ error: 'Yetkilendirme gerekli' });
+    }
+    const token = authHeader.split(' ')[1];
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'cemre_secret_key_2026_secured');
+        req.user = decoded;
+        next();
+    } catch (err) {
+        console.warn(`[AUTH] Reddedildi - Geçersiz token. Path: ${req.path}`);
+        return res.status(401).json({ error: 'Geçersiz veya süresi dolmuş token' });
+    }
+};
+// --------------------------
 
 // Auth Route
 app.post('/api/auth/login', async (req, res) => {
@@ -172,7 +205,7 @@ app.post('/api/auth/login', async (req, res) => {
         // Generate generic JWT token
         const token = jwt.sign(
             { id: user.id, username: user.username },
-            process.env.JWT_SECRET || 'seyran_secret_key_2026',
+            process.env.JWT_SECRET || 'cemre_secret_key_2026_secured',
             { expiresIn: '24h' }
         )
 
@@ -188,8 +221,8 @@ app.post('/api/auth/login', async (req, res) => {
     }
 })
 
-// Orders Route
-app.get('/api/orders', async (req, res) => {
+// Orders Route (Protected)
+app.get('/api/orders', authMiddleware, async (req, res) => {
     try {
         const orders = await prisma.order.findMany({
             orderBy: { tarih: 'desc' }
@@ -201,8 +234,8 @@ app.get('/api/orders', async (req, res) => {
     }
 })
 
-// Original Logic: /test/deneme -> repurposed to /api/mail/send
-app.post('/api/mail/send', async (req, res) => {
+// Mail Send Route (Protected)
+app.post('/api/mail/send', authMiddleware, async (req, res) => {
     console.log('Mail gönderme isteği aldı:', req.body.headerText);
 
     try {
@@ -212,7 +245,7 @@ app.post('/api/mail/send', async (req, res) => {
             for (let i = 0; i < req.body.images.length; i++) {
                 const base64Data = req.body.images[i].split(';base64,').pop()
                 attachments.push({
-                    filename: `image_${Date.now()}_${i}.jpeg`, // Better naming
+                    filename: `image_${Date.now()}_${i}.jpeg`,
                     content: base64Data,
                     encoding: 'base64'
                 })
@@ -221,13 +254,6 @@ app.post('/api/mail/send', async (req, res) => {
 
         // 2. Prepare Question/Answers HTML
         const questionAnswersHTML = req.body.questions.map(q => {
-            // Find answer
-            // The old code was weird: answer: Object.values(req.body.answers)[i]
-            // We should try to be safer.
-            // Assume questions and answers are aligned or passed correctly.
-            // Ideally the frontend sends structured { question, answer } pairs.
-            // But if we keep frontend roughly same, we follow the pattern.
-            // For the HTML view:
             return `<div style='display: flex; flex-direction: row; max-width: 400px; border-bottom: 1px solid #ccc;'>
                         <span style='width: 70%; padding: 10px; background-color: #f0f0f0; margin-top: 10px;'>${q.question}</span>
                         <span style='width: 30%; padding: 10px; margin-top: 10px; background-color: aquamarine; display: flex; align-items: center; justify-content: center;'>${q.fakeRes || "Evet"}</span>
@@ -248,9 +274,6 @@ app.post('/api/mail/send', async (req, res) => {
             }
         }
 
-        // Map answers for XML
-        // Assuming req.body.answers is an object with keys matching indices or just values?
-        // Old code: answer: Object.values(req.body.answers)[i]
         const answerValues = Object.values(req.body.answers || {})
         for (let i = 0; i < req.body.questions.length; i++) {
             xmlData.questions.push({
@@ -259,87 +282,48 @@ app.post('/api/mail/send', async (req, res) => {
             })
         }
 
-        // 4. Build XML
+        // 4. Build XML & write locally
         const builder = new xml2js.Builder()
         const xml = builder.buildObject(xmlData)
         const xmlFilename = `${xmlData.musInfo.sipno}-${xmlData.musInfo.sipsr}.xml`
         const localXmlPath = path.join(__dirname, xmlFilename)
-
-        // Write XML locally first
         fs.writeFileSync(localXmlPath, xml)
 
-        // 5. Upload to FTP
-        const client = new Client()
-        // client.ftp.verbose = true
-        try {
-            await client.access({
-                host: process.env.FTP_HOST,
-                user: process.env.FTP_USER,
-                password: process.env.FTP_PASS,
-                secure: false
-            })
-            // await client.ensureDir("/kalite-kontrol") // Optional, if needed
-            // The old code uploaded to `kalite-kontrol` + filename directly?
-            // Old code: "./kalite-kontrol" + xmlFileInner.musInfo.sipno + "-" + ...
-            // Let's assume there is a folder 'kalite-kontrol'.
-            const remotePath = `/kalite-kontrol/${xmlFilename}` // Correct pathing
-            await client.uploadFrom(localXmlPath, remotePath)
-            console.log('Uploaded to FTP:', remotePath)
-        } catch (ftpErr) {
-            console.error('FTP Error:', ftpErr)
-            // Don't fail the whole request just for FTP if mail works, or vice versa?
-            // Usually we want to know.
-        } finally {
-            client.close()
-            // Cleanup local file
-            if (fs.existsSync(localXmlPath)) fs.unlinkSync(localXmlPath)
-        }
-
-        // 6. Send Email
+        // 5. Send Email FIRST (user waits for this)
         let transporter = nodemailer.createTransport({
             host: process.env.SMTP_HOST,
-            port: parseInt(process.env.SMTP_PORT || '465'),
-            secure: true,
+            port: parseInt(process.env.SMTP_PORT || '587'),
+            secure: parseInt(process.env.SMTP_PORT || '587') === 465,
             auth: {
                 user: process.env.SMTP_USER,
                 pass: process.env.SMTP_PASS,
             },
         })
 
-        // Determine receivers
-        // User requested to send to real customers
-        const customerMail = req.body.params?.mail; // e.g. "musteri@example.com"
+        const customerMail = req.body.params?.mail;
         const testMail = process.env.TEST_MAIL_RECEIVER || "mikbalaygun@gmail.com";
 
-        // Construct receivers list
-        // If customer mail exists, send to it. 
-        // Also send copy to test/admin mail for verification/monitoring if desired, or just use customer mail.
-        // Interpretation: "Real users" -> Primary.
         const receivers = [];
         if (customerMail && customerMail.includes('@')) {
             receivers.push(customerMail);
-            // Optionally CC the admin
-            // receivers.push(testMail); 
         } else {
             console.warn("Müşteri maili bulunamadı veya geçersiz. Test mailine gönderiliyor.");
             receivers.push(testMail);
         }
-
-        // Additional hardcoded CCs if needed (from old v1 app logic usually there is a fixed list)
-        // For now, adhering strictly to "send to real users".
 
         console.log('Mail gönderiliyor:', receivers)
 
         await transporter.sendMail({
             from: process.env.SMTP_USER,
             to: receivers,
-            cc: [testMail], // Always CC the admin/test receiver for tracking
-            subject: req.body.headerText || "Kalite Kontrol Raporu",
+            // Check if Cemre has a specific CC address, otherwise use same pattern
+            cc: [testMail, 'kalitekontrol@seyrankoltuk.com.tr'],
+            subject: req.body.headerText || "Cemre Koltuk Kalite Kontrol Raporu",
             html: `<!DOCTYPE html>
-            <html lang="en">
+            <html lang="tr">
             <head>
                 <meta charset="UTF-8" />
-                <title>Seyran Koltuk</title>
+                <title>Cemre Koltuk</title>
             </head>
             <body>
                 <div style="font-family: Arial, sans-serif; padding: 20px;">
@@ -353,14 +337,16 @@ app.post('/api/mail/send', async (req, res) => {
             attachments: attachments
         })
 
-        // 7. Update Order Status in DB (Mark as Mail Sent)
-        if (req.body.params && req.body.params.sipno && req.body.params.sipsr) {
+        // 6. Update Order Status in DB
+        const params = req.body.params || {};
+        if (params.sipno && params.sipsr) {
             try {
-                // Ensure they are integers as per schema
-                const sipno = parseInt(req.body.params.sipno);
-                const sipsr = parseInt(req.body.params.sipsr);
+                const sipno = Number(params.sipno);
+                const sipsr = Number(params.sipsr);
 
-                await prisma.order.update({
+                console.log(`DB Güncelleme Başlıyor: ${sipno}-${sipsr}`);
+
+                const updatedOrder = await prisma.order.update({
                     where: {
                         sipno_sipsr: { sipno, sipsr }
                     },
@@ -369,13 +355,38 @@ app.post('/api/mail/send', async (req, res) => {
                         mailSentAt: new Date()
                     }
                 });
-                console.log(`Sipariş mail durumu güncellendi: ${sipno}-${sipsr}`);
+                console.log(`✅ Sipariş mail durumu güncellendi: ${updatedOrder.sipno}-${updatedOrder.sipsr}`);
             } catch (dbErr) {
-                console.error('Sipariş durumu güncellenemedi (Mail Sent Flag):', dbErr);
+                console.error('❌ Sipariş durumu güncellenemedi (Mail Sent Flag):', dbErr);
             }
+        } else {
+            console.warn('⚠️ Mail atıldı ama sipno/sipsr eksik, DB güncellenemedi:', params);
         }
 
-        res.json({ success: true, message: 'Mail gönderildi ve FTP yüklendi' })
+        // 7. RESPOND IMMEDIATELY - User sees success here!
+        res.json({ success: true, message: 'Mail gönderildi' })
+
+            // 8. Upload FTP in BACKGROUND (user does NOT wait for this)
+            ; (async () => {
+                const client = new Client(60000) // 1 minute timeout
+                client.ftp.verbose = true
+                try {
+                    await client.access({
+                        host: process.env.FTP_HOST,
+                        user: process.env.FTP_USER,
+                        password: process.env.FTP_PASS,
+                        secure: false
+                    })
+                    const remotePath = `/kalite-kontrol/${xmlFilename}`
+                    await client.uploadFrom(localXmlPath, remotePath)
+                    console.log('FTP yükleme tamamlandı (arka plan):', remotePath)
+                } catch (ftpErr) {
+                    console.error('FTP Error (arka plan):', ftpErr)
+                } finally {
+                    client.close()
+                    if (fs.existsSync(localXmlPath)) fs.unlinkSync(localXmlPath)
+                }
+            })();
 
     } catch (error) {
         console.error('Process Error:', error)
