@@ -33,14 +33,27 @@ if (!fs.existsSync(WATCH_DIR)) {
 
 console.log(`Watching for ERP data at: ${FULL_WATCH_PATH}`);
 
+// Debounce to prevent multiple rapid triggers
+let processingLock = false;
+
 // Function to process the JSON file
 const processErpFile = async () => {
+    // Prevent overlapping executions
+    if (processingLock) {
+        console.log('Zaten işleniyor, atlanıyor...');
+        return;
+    }
+    processingLock = true;
+
     console.log('ERP dosya değişikliği algılandı. İşleniyor...');
 
     // Wait a brief moment to ensure file write is complete
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    if (!fs.existsSync(FULL_WATCH_PATH)) return;
+    if (!fs.existsSync(FULL_WATCH_PATH)) {
+        processingLock = false;
+        return;
+    }
 
     try {
         const rawData = fs.readFileSync(FULL_WATCH_PATH, 'utf-8');
@@ -49,13 +62,34 @@ const processErpFile = async () => {
 
         if (!Array.isArray(orders)) {
             console.error('ERP Dosya Formatı Hatalı: wtemp dizisi bulunamadı.');
+            processingLock = false;
             return;
         }
 
         console.log(`Bulunan Sipariş Sayısı: ${orders.length}. Veritabanı güncelleniyor...`);
 
-        let count = 0;
+        let newCount = 0;
+        let updateCount = 0;
         for (const order of orders) {
+            const orderData = {
+                firma: order.firma,
+                musadi: order.musadi,
+                mail: order.mail,
+                tarih: order.tarih,
+                urunadi: order.urunadi,
+                out: order.out,
+                stkno: order.stkno ? String(order.stkno) : null,
+                sevktar: order.sevktar,
+                mik: order.mik,
+                modul: order.modul,
+                kumas: order.kumas,
+                acik: order.acik,
+                ayak: order.ayak,
+                kirlent: order.kirlent,
+                tip: order.tip,
+            };
+
+            // First check if it exists (for diff check to avoid unnecessary updatedAt changes)
             const exists = await prisma.order.findUnique({
                 where: {
                     sipno_sipsr: {
@@ -66,30 +100,23 @@ const processErpFile = async () => {
             });
 
             if (!exists) {
-                await prisma.order.create({
-                    data: {
+                // Use upsert to safely handle race conditions
+                await prisma.order.upsert({
+                    where: {
+                        sipno_sipsr: {
+                            sipno: order.sipno,
+                            sipsr: order.sipsr,
+                        }
+                    },
+                    create: {
                         sipno: order.sipno,
                         sipsr: order.sipsr,
-                        firma: order.firma,
-                        musadi: order.musadi,
-                        mail: order.mail,
-                        tarih: order.tarih,
-                        urunadi: order.urunadi,
-                        out: order.out,
-                        stkno: order.stkno ? String(order.stkno) : null,
-                        sevktar: order.sevktar,
-                        mik: order.mik,
-                        modul: order.modul,
-                        kumas: order.kumas,
-                        acik: order.acik,
-                        ayak: order.ayak,
-                        kirlent: order.kirlent,
-                        tip: order.tip,
-                    }
+                        ...orderData,
+                    },
+                    update: {} // If it was already created by a parallel run, do nothing
                 });
-                count++;
+                newCount++;
             } else {
-                // Update existing order if found (e.g. name change, details change)
                 // Check if data actually changed to avoid unnecessary updates/timestamp refreshes
                 const isDifferent =
                     exists.firma !== order.firma ||
@@ -111,32 +138,19 @@ const processErpFile = async () => {
                 if (isDifferent) {
                     await prisma.order.update({
                         where: { id: exists.id },
-                        data: {
-                            firma: order.firma,
-                            musadi: order.musadi,
-                            mail: order.mail,
-                            tarih: order.tarih,
-                            urunadi: order.urunadi,
-                            out: order.out,
-                            stkno: order.stkno ? String(order.stkno) : null,
-                            sevktar: order.sevktar,
-                            mik: order.mik,
-                            modul: order.modul,
-                            kumas: order.kumas,
-                            acik: order.acik,
-                            ayak: order.ayak,
-                            kirlent: order.kirlent,
-                            tip: order.tip,
-                        }
+                        data: orderData
                     });
+                    updateCount++;
                     console.log(`Sipariş güncellendi: ${order.sipno}-${order.sipsr}`);
                 }
             }
         }
-        console.log(`Senkronizasyon Tamamlandı. ${count} yeni sipariş eklendi.`);
+        console.log(`Senkronizasyon Tamamlandı. ${newCount} yeni, ${updateCount} güncellenen sipariş.`);
 
     } catch (err) {
         console.error('ERP Dosya İşleme Hatası:', err);
+    } finally {
+        processingLock = false;
     }
 };
 
