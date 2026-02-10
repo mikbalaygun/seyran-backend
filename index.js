@@ -169,6 +169,7 @@ fs.watch(WATCH_DIR, (eventType, filename) => {
 const authMiddleware = (req, res, next) => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        console.warn(`[AUTH] Reddedildi - Token yok. Path: ${req.path}`);
         return res.status(401).json({ error: 'Yetkilendirme gerekli' });
     }
     const token = authHeader.split(' ')[1];
@@ -177,6 +178,7 @@ const authMiddleware = (req, res, next) => {
         req.user = decoded;
         next();
     } catch (err) {
+        console.warn(`[AUTH] Reddedildi - Geçersiz token. Path: ${req.path}`);
         return res.status(401).json({ error: 'Geçersiz veya süresi dolmuş token' });
     }
 };
