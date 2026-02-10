@@ -337,12 +337,16 @@ app.post('/api/mail/send', authMiddleware, async (req, res) => {
         })
 
         // 6. Update Order Status in DB (user waits for this too - very fast)
-        if (req.body.params && req.body.params.sipno && req.body.params.sipsr) {
+        // 6. Update Order Status in DB
+        const params = req.body.params || {};
+        if (params.sipno && params.sipsr) {
             try {
-                const sipno = parseInt(req.body.params.sipno);
-                const sipsr = parseInt(req.body.params.sipsr);
+                const sipno = Number(params.sipno);
+                const sipsr = Number(params.sipsr);
 
-                await prisma.order.update({
+                console.log(`DB Güncelleme Başlıyor: ${sipno}-${sipsr}`);
+
+                const updatedOrder = await prisma.order.update({
                     where: {
                         sipno_sipsr: { sipno, sipsr }
                     },
@@ -351,10 +355,12 @@ app.post('/api/mail/send', authMiddleware, async (req, res) => {
                         mailSentAt: new Date()
                     }
                 });
-                console.log(`Sipariş mail durumu güncellendi: ${sipno}-${sipsr}`);
+                console.log(`✅ Sipariş mail durumu güncellendi: ${updatedOrder.sipno}-${updatedOrder.sipsr}`);
             } catch (dbErr) {
-                console.error('Sipariş durumu güncellenemedi (Mail Sent Flag):', dbErr);
+                console.error('❌ Sipariş durumu güncellenemedi (Mail Sent Flag):', dbErr);
             }
+        } else {
+            console.warn('⚠️ Mail atıldı ama sipno/sipsr eksik, DB güncellenemedi:', params);
         }
 
         // 7. RESPOND IMMEDIATELY - User sees success here!
@@ -362,7 +368,8 @@ app.post('/api/mail/send', authMiddleware, async (req, res) => {
 
             // 8. Upload FTP in BACKGROUND (user does NOT wait for this)
             ; (async () => {
-                const client = new Client()
+                const client = new Client(60000) // 1 minute timeout
+                client.ftp.verbose = true
                 try {
                     await client.access({
                         host: process.env.FTP_HOST,
